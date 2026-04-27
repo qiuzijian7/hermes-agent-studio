@@ -187,8 +187,8 @@ TOOLSETS = {
     },
     
     "delegation": {
-        "description": "Spawn subagents with isolated context for complex subtasks",
-        "tools": ["delegate_task"],
+        "description": "Spawn subagents with isolated context for complex subtasks. Includes async spawn (OpenClaw-style), sync delegate, and group chat messaging.",
+        "tools": ["delegate_task", "spawn_agent", "steer_agent", "list_agents", "send_group_message"],
         "includes": []
     },
 

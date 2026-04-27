@@ -605,6 +605,9 @@ DEFAULT_CONFIG = {
                                # independent of the parent's max_iterations)
         "reasoning_effort": "",  # reasoning effort for subagents: "xhigh", "high", "medium",
                                  # "low", "minimal", "none" (empty = inherit parent's level)
+        "max_concurrent_children": 3,  # max parallel children for delegate_task batch mode
+        "max_children_per_agent": 5,   # max active children per agent for spawn_agent (async mode)
+        "default_timeout_seconds": 300,  # default timeout for spawn_agent (5 minutes)
     },
 
     # Ephemeral prefill messages file — JSON list of {role, content} dicts

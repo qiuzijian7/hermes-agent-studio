@@ -154,6 +154,8 @@ def _discover_tools():
         "tools.clarify_tool",
         "tools.code_execution_tool",
         "tools.delegate_tool",
+        "tools.agent_runner",  # OpenClaw-style async multi-agent: spawn_agent, steer_agent, list_agents
+        "tools.group_message_tool",  # Send messages to workspace group chat (总群)
         "tools.process_registry",
         "tools.send_message_tool",
         # "tools.honcho_tools",  # Removed — Honcho is now a memory provider plugin

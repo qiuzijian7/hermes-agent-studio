@@ -3063,6 +3063,14 @@ class AIAgent:
         except Exception:
             pass
 
+        # 4.5 Close async agent runner (spawn_agent children)
+        try:
+            _runner = getattr(self, '_agent_runner', None)
+            if _runner is not None:
+                _runner.close_all()
+        except Exception:
+            pass
+
         # 5. Close the OpenAI/httpx client
         try:
             client = getattr(self, "client", None)
@@ -8034,6 +8042,41 @@ class AIAgent:
                     self._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
                 break
             
+            # ── Announce injection: async child agent results ──
+            # Poll the agent runner's announce queue and inject completed
+            # child results as user messages (OpenClaw-style push model).
+            _runner = getattr(self, '_agent_runner', None)
+            if _runner is not None and _runner.has_pending_announces():
+                for _announce in _runner.poll_announces(max_items=5):
+                    _ann_sid = _announce.get("session_id", "?")
+                    _ann_label = _announce.get("label", "child")
+                    _ann_status = _announce.get("status", "?")
+                    _ann_summary = _announce.get("summary", "")
+                    _ann_dur = _announce.get("duration_seconds", 0)
+                    _ann_name = _announce.get("employee_name", "")
+                    _status_icon = "✅" if _ann_status == "completed" else "⚠️"
+                    _who = f"「{_ann_name}」" if _ann_name else f"子agent({_ann_label})"
+                    _announce_msg = (
+                        f"{_status_icon} [{_who} 完成通知]\n"
+                        f"会话: {_ann_sid}\n"
+                        f"状态: {_ann_status}\n"
+                        f"耗时: {_ann_dur}s\n\n"
+                        f"执行结果:\n{_ann_summary}"
+                    )
+                    messages.append({"role": "user", "content": _announce_msg})
+                    if not self.quiet_mode:
+                        self._safe_print(f"\n📢 Announce from {_who}: {_ann_status} ({_ann_dur}s)")
+            
+            # ── Steer injection: async child agent guidance ──
+            # If this agent has a pending steer message (from parent via spawn_agent),
+            # inject it as a user message so the agent adjusts its approach.
+            _steer_msg = getattr(self, '_steer_message', None)
+            if _steer_msg:
+                self._steer_message = None
+                messages.append({"role": "user", "content": _steer_msg})
+                if not self.quiet_mode:
+                    self._safe_print("\n📡 Received parent guidance (steer)")
+            
             api_call_count += 1
             self._api_call_count = api_call_count
             self._touch_activity(f"starting API call #{api_call_count}")
@@ -9641,14 +9684,32 @@ class AIAgent:
                     elif isinstance(raw, list):
                         # Multimodal content list — extract text parts
                         parts = []
+                        reasoning_parts = []
                         for part in raw:
                             if isinstance(part, str):
                                 parts.append(part)
-                            elif isinstance(part, dict) and part.get("type") == "text":
-                                parts.append(part.get("text", ""))
-                            elif isinstance(part, dict) and "text" in part:
-                                parts.append(str(part["text"]))
+                            elif isinstance(part, dict):
+                                if part.get("type") == "text":
+                                    parts.append(part.get("text", ""))
+                                elif part.get("type") in ("thinking", "reasoning"):
+                                    reasoning_parts.append(part.get("thinking") or part.get("reasoning") or part.get("text", ""))
+                                elif "text" in part:
+                                    parts.append(str(part["text"]))
+                            else:
+                                # Handle SDK objects (e.g. anthropic ThinkingBlock/TextBlock)
+                                part_type = getattr(part, "type", None)
+                                if part_type == "text":
+                                    parts.append(getattr(part, "text", "") or "")
+                                elif part_type in ("thinking", "reasoning"):
+                                    reasoning_parts.append(
+                                        getattr(part, "thinking", "")
+                                        or getattr(part, "reasoning", "")
+                                        or getattr(part, "text", "")
+                                        or ""
+                                    )
                         assistant_message.content = "\n".join(parts)
+                        if reasoning_parts and not getattr(assistant_message, "reasoning_content", None):
+                            assistant_message.reasoning_content = "\n\n".join(reasoning_parts)
                     else:
                         assistant_message.content = str(raw)
 

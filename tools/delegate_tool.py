@@ -36,6 +36,8 @@ DELEGATE_BLOCKED_TOOLS = frozenset([
     "send_message",    # no cross-platform side effects
     "execute_code",    # children should reason step-by-step, not write scripts
 ])
+# Note: send_group_message is NOT blocked — child agents can report progress
+# back to the group chat, enabling inter-employee communication.
 
 # Build a description fragment listing toolsets available for subagents.
 # Excludes toolsets where ALL tools are blocked, composite/platform toolsets
@@ -92,13 +94,22 @@ def _build_child_system_prompt(
     context: Optional[str] = None,
     *,
     workspace_path: Optional[str] = None,
+    employee_name: Optional[str] = None,
+    employee_role: Optional[str] = None,
 ) -> str:
     """Build a focused system prompt for a child agent."""
-    parts = [
-        "You are a focused subagent working on a specific delegated task.",
-        "",
-        f"YOUR TASK:\n{goal}",
-    ]
+    if employee_name:
+        identity = f"You are 「{employee_name}」"
+        if employee_role:
+            identity += f"，角色为「{employee_role}」"
+        identity += "，正在执行一项委派任务。"
+        parts = [identity, "", f"YOUR TASK:\n{goal}"]
+    else:
+        parts = [
+            "You are a focused subagent working on a specific delegated task.",
+            "",
+            f"YOUR TASK:\n{goal}",
+        ]
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
     if workspace_path and str(workspace_path).strip():
@@ -120,6 +131,71 @@ def _build_child_system_prompt(
         "parent agent as a summary."
     )
     return "\n".join(parts)
+
+
+def _inject_delegation_to_employee_session(
+    parent_agent,
+    employee_name: str,
+    child_session_id: str,
+    task_goal: str,
+    summary: str,
+    status: str,
+) -> None:
+    """Inject a delegation result summary into the employee's own session.
+
+    When a parent agent delegates a task to an employee (by name), we look up
+    the employee's session via the session title convention used by the WebUI
+    ("Employee: <name>") and append a structured assistant message so that
+    the employee "remembers" what it did when the user later opens a direct
+    chat with that employee.
+
+    This is a best-effort operation — if the employee session cannot be found,
+    we silently skip it rather than failing the delegation.
+    """
+    session_db = getattr(parent_agent, '_session_db', None)
+    if session_db is None:
+        return
+
+    try:
+        # Find the employee's session by title convention
+        # WebUI creates sessions with title "Employee: <name>"
+        emp_title = f"Employee: {employee_name}"
+        emp_session_id = session_db.resolve_session_by_title(emp_title)
+        if emp_session_id is None:
+            # Try alternate title formats
+            for alt in [employee_name, f"Chat with {employee_name}"]:
+                emp_session_id = session_db.resolve_session_by_title(alt)
+                if emp_session_id is not None:
+                    break
+
+        if emp_session_id is None:
+            logger.debug(
+                "No session found for employee '%s' (tried titles: '%s', '%s')",
+                employee_name, emp_title, employee_name,
+            )
+            return
+
+        # Build the delegation trace message
+        status_icon = "✅" if status == "completed" else "⚠️"
+        trace_msg = (
+            f"{status_icon} [委派执行记录]\n"
+            f"任务：{task_goal[:500]}\n"
+            f"状态：{status}\n"
+            f"执行结果：{summary[:2000]}\n"
+            f"子会话ID：{child_session_id}"
+        )
+
+        session_db.append_message(
+            session_id=emp_session_id,
+            role="assistant",
+            content=trace_msg,
+        )
+        logger.debug(
+            "Injected delegation summary into employee '%s' session %s",
+            employee_name, emp_session_id,
+        )
+    except Exception as e:
+        logger.debug("Could not inject delegation to employee session: %s", e)
 
 
 def _resolve_workspace_hint(parent_agent) -> Optional[str]:
@@ -251,6 +327,9 @@ def _build_child_agent(
     # ACP transport overrides — lets a non-ACP parent spawn ACP child agents
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
+    # Employee identity for delegation traceability
+    employee_name: Optional[str] = None,
+    employee_role: Optional[str] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -291,7 +370,10 @@ def _build_child_agent(
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
-    child_prompt = _build_child_system_prompt(goal, context, workspace_path=workspace_hint)
+    child_prompt = _build_child_system_prompt(
+        goal, context, workspace_path=workspace_hint,
+        employee_name=employee_name, employee_role=employee_role,
+    )
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -401,6 +483,7 @@ def _run_single_child(
     goal: str,
     child=None,
     parent_agent=None,
+    timeout_seconds: Optional[float] = None,
     **_kwargs,
 ) -> Dict[str, Any]:
     """
@@ -438,6 +521,17 @@ def _run_single_child(
 
     def _heartbeat_loop():
         while not _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+            # Timeout check
+            if timeout_seconds and timeout_seconds > 0:
+                elapsed = time.monotonic() - child_start
+                if elapsed >= timeout_seconds:
+                    logger.info("Child agent %d timed out after %.0fs", task_index, elapsed)
+                    try:
+                        child.interrupt("Timeout: execution exceeded time limit")
+                    except Exception:
+                        pass
+                    return
+
             if parent_agent is None:
                 continue
             touch = getattr(parent_agent, '_touch_activity', None)
@@ -548,6 +642,7 @@ def _run_single_child(
 
         entry: Dict[str, Any] = {
             "task_index": task_index,
+            "child_session_id": getattr(child, "session_id", None),
             "status": status,
             "summary": summary,
             "api_calls": api_calls,
@@ -626,8 +721,11 @@ def delegate_task(
     toolsets: Optional[List[str]] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
+    timeout_seconds: Optional[float] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
+    employee_name: Optional[str] = None,
+    employee_role: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -656,6 +754,10 @@ def delegate_task(
     cfg = _load_config()
     default_max_iter = cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
     effective_max_iter = max_iterations or default_max_iter
+    # Timeout: per-task config > top-level param > config default > no timeout
+    effective_timeout = timeout_seconds
+    if effective_timeout is None:
+        effective_timeout = cfg.get("default_timeout_seconds", None)
 
     # Resolve delegation credentials (provider:model pair).
     # When delegation.provider is configured, this resolves the full credential
@@ -720,6 +822,8 @@ def delegate_task(
                 override_api_mode=creds["api_mode"],
                 override_acp_command=t.get("acp_command") or acp_command,
                 override_acp_args=t.get("acp_args") or acp_args,
+                employee_name=t.get("employee_name") or employee_name,
+                employee_role=t.get("employee_role") or employee_role,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -731,7 +835,8 @@ def delegate_task(
     if n_tasks == 1:
         # Single task -- run directly (no thread pool overhead)
         _i, _t, child = children[0]
-        result = _run_single_child(0, _t["goal"], child, parent_agent)
+        result = _run_single_child(0, _t["goal"], child, parent_agent,
+                                   timeout_seconds=effective_timeout)
         results.append(result)
     else:
         # Batch -- run in parallel with per-task progress lines
@@ -747,6 +852,7 @@ def delegate_task(
                     goal=t["goal"],
                     child=child,
                     parent_agent=parent_agent,
+                    timeout_seconds=effective_timeout,
                 )
                 futures[future] = i
 
@@ -792,6 +898,35 @@ def delegate_task(
         # Sort by task_index so results match input order
         results.sort(key=lambda r: r["task_index"])
 
+    # Annotate each result with employee identity and inject summary
+    # into the employee's own session for traceability.
+    _effective_emp_name = employee_name
+    _effective_emp_role = employee_role
+    for entry in results:
+        idx = entry.get("task_index", 0)
+        if idx < len(task_list):
+            t = task_list[idx]
+            entry["employee_name"] = t.get("employee_name") or _effective_emp_name
+            entry["employee_role"] = t.get("employee_role") or _effective_emp_role
+        else:
+            entry["employee_name"] = _effective_emp_name
+            entry["employee_role"] = _effective_emp_role
+
+        # Inject delegation summary into the employee's session if we can
+        # find one via the parent agent's session DB.
+        _emp_name = entry.get("employee_name")
+        _child_sid = entry.get("child_session_id")
+        _summary = entry.get("summary", "")
+        if _emp_name and _child_sid and _summary and parent_agent:
+            try:
+                _inject_delegation_to_employee_session(
+                    parent_agent, _emp_name, _child_sid,
+                    task_list[idx]["goal"] if idx < len(task_list) else "",
+                    _summary, entry.get("status", ""),
+                )
+            except Exception as e:
+                logger.debug("Failed to inject delegation summary to employee session: %s", e)
+
     # Notify parent's memory provider of delegation outcomes
     if parent_agent and hasattr(parent_agent, '_memory_manager') and parent_agent._memory_manager:
         for entry in results:
@@ -804,6 +939,29 @@ def delegate_task(
                 )
             except Exception:
                 pass
+
+    # ── Auto-post delegation results to group chat (总群) ──
+    # When running inside the WebUI (HERMES_SESSION_KEY is set), post
+    # delegation results back to the group chat so they're visible to
+    # all team members and the user.
+    _workspace = os.getenv("TERMINAL_CWD", "").strip()
+    _parent_emp_name = os.getenv("HERMES_EMPLOYEE_NAME", "").strip()
+    if _workspace and any(entry.get("employee_name") for entry in results):
+        for entry in results:
+            _emp_name = entry.get("employee_name")
+            _summary = entry.get("summary", "")
+            _status = entry.get("status", "")
+            if _emp_name and _summary and _status in ("completed", "interrupted"):
+                try:
+                    _post_delegation_to_group_chat(
+                        workspace=_workspace,
+                        parent_employee_name=_parent_emp_name,
+                        child_employee_name=_emp_name,
+                        summary=_summary,
+                        status=_status,
+                    )
+                except Exception as e:
+                    logger.debug("Failed to post delegation result to group chat: %s", e)
 
     total_duration = round(time.monotonic() - overall_start, 2)
 
@@ -934,6 +1092,54 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     }
 
 
+def _post_delegation_to_group_chat(
+    workspace: str,
+    parent_employee_name: str,
+    child_employee_name: str,
+    summary: str,
+    status: str,
+) -> None:
+    """Post a delegation result to the workspace group chat via the WebUI API.
+
+    This enables delegation results to automatically appear in the group chat
+    when employee agents use delegate_task within the WebUI context.
+    Best-effort: silently fails if the WebUI is not reachable.
+    """
+    import urllib.request
+    import urllib.error
+
+    base_url = os.getenv("HERMES_WEBUI_URL", "http://127.0.0.1:18080")
+    url = f"{base_url}/api/group-chat/result"
+
+    # Build the result content with context about who delegated to whom
+    requester = parent_employee_name or "你"
+    content_parts = []
+    if parent_employee_name:
+        content_parts.append(f"（由 {parent_employee_name} 委派）")
+    content_parts.append(summary)
+    result_content = "\n".join(content_parts)
+
+    payload = {
+        "workspace": workspace,
+        "employee_name": child_employee_name,
+        "task_id": "",
+        "result": result_content,
+        "requester_name": requester,
+    }
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()  # consume response
+    except Exception as e:
+        logger.debug("Could not post delegation result to group chat: %s", e)
+
+
 def _load_config() -> dict:
     """Load delegation config from CLI_CONFIG or persistent config.
 
@@ -1040,6 +1246,14 @@ DELEGATE_TASK_SCHEMA = {
                             "items": {"type": "string"},
                             "description": "Per-task ACP args override.",
                         },
+                        "employee_name": {
+                            "type": "string",
+                            "description": "Name of the employee for this specific task. Overrides the top-level employee_name.",
+                        },
+                        "employee_role": {
+                            "type": "string",
+                            "description": "Role of the employee for this specific task. Overrides the top-level employee_role.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -1076,6 +1290,46 @@ DELEGATE_TASK_SCHEMA = {
                     "Only used when acp_command is set. Example: ['--acp', '--stdio', '--model', 'claude-opus-4-6']"
                 ),
             },
+            "employee_name": {
+                "type": "string",
+                "description": (
+                    "Name of the employee this subagent represents. When set, the "
+                    "subagent identifies as this employee and the delegation result "
+                    "is linked to the employee's session for traceability. "
+                    "Used by the Hermes Studio WebUI to connect delegation results "
+                    "to the correct employee card."
+                ),
+            },
+            "employee_role": {
+                "type": "string",
+                "description": (
+                    "Role/specialty of the employee this subagent represents. "
+                    "Used together with employee_name to give the subagent proper "
+                    "identity context."
+                ),
+            },
+            "timeout_seconds": {
+                "type": "number",
+                "description": (
+                    "Maximum execution time per subagent in seconds (default: 300). "
+                    "If a subagent exceeds this time, it is interrupted. "
+                    "This provides time-based control in addition to the iteration limit."
+                ),
+            },
+            "team_structure": {
+                "type": "object",
+                "description": (
+                    "Structured team definition for auto-creating employee cards on the "
+                    "canvas. When provided, the WebUI creates employee cards with "
+                    "connections automatically. Format: "
+                    '{"team_name": "Team Name", "members": [{"name": "Member Name", '
+                    '"presetId": "creative-director", "role": "Director", "model": "opus", '
+                    '"manages": ["Other Member Name"]}]}  '
+                    "presetId is optional; when set it matches a built-in agent preset. "
+                    "manages lists the names of subordinates this member supervises. "
+                    "Use this when the user asks to build or assemble a team."
+                ),
+            },
         },
         "required": [],
     },
@@ -1095,8 +1349,11 @@ registry.register(
         toolsets=args.get("toolsets"),
         tasks=args.get("tasks"),
         max_iterations=args.get("max_iterations"),
+        timeout_seconds=args.get("timeout_seconds"),
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
+        employee_name=args.get("employee_name"),
+        employee_role=args.get("employee_role"),
         parent_agent=kw.get("parent_agent")),
     check_fn=check_delegate_requirements,
     emoji="🔀",

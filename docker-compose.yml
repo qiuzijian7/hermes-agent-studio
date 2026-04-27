@@ -1,0 +1,98 @@
+# Hermes Agent Studio — Docker Compose (local build)
+#
+# Runs hermes-agent + hermes-webui-studio in two connected containers.
+# The agent container bootstraps config and provides source; the webui
+# container serves the browser interface on port 8787.  Both share a
+# named volume for HERMES_HOME (config, sessions, skills, memory, .env).
+#
+# Usage:
+#   docker compose up -d --build
+#
+# First-time setup — add your API keys to the shared .env:
+#   docker compose exec agent bash -c "cat /opt/data/.env"
+#   docker compose exec agent nano /opt/data/.env
+#   docker compose restart webui
+#
+# Or mount your existing ~/.hermes by replacing the hermes-home
+# named volume with a bind mount:
+#   - ~/.hermes:/opt/data          # agent
+#   - ~/.hermes:/home/hermeswebui/.hermes  # webui
+#
+# Access: http://localhost:8790
+
+services:
+  # ── Agent backend ──────────────────────────────────────────────────────────
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hermes-agent
+    volumes:
+      # Persist config, state, sessions, skills, memory across restarts
+      - hermes-home:/opt/data
+      # Expose agent source so the WebUI can install Python deps from it
+      - hermes-agent-src:/opt/hermes
+    environment:
+      - HERMES_HOME=/opt/data
+    # Override entrypoint: bootstrap config only, then keep container alive.
+    # The default entrypoint.sh would try to run `hermes` CLI which needs a TTY.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        HERMES_HOME="/opt/data"
+        INSTALL_DIR="/opt/hermes"
+        echo "== Hermes Agent — bootstrap"
+        mkdir -p "$$HERMES_HOME"/{cron,sessions,logs,hooks,memories,skills,skins,plans,workspace,home}
+        [ ! -f "$$HERMES_HOME/.env" ] && [ -f "$$INSTALL_DIR/.env.example" ] && cp "$$INSTALL_DIR/.env.example" "$$HERMES_HOME/.env" && echo "[ok] Created .env"
+        [ ! -f "$$HERMES_HOME/config.yaml" ] && [ -f "$$INSTALL_DIR/cli-config.yaml.example" ] && cp "$$INSTALL_DIR/cli-config.yaml.example" "$$HERMES_HOME/config.yaml" && echo "[ok] Created config.yaml"
+        [ ! -f "$$HERMES_HOME/SOUL.md" ] && [ -f "$$INSTALL_DIR/docker/SOUL.md" ] && cp "$$INSTALL_DIR/docker/SOUL.md" "$$HERMES_HOME/SOUL.md"
+        echo "[ok] Bootstrap complete — container alive for volume sharing"
+        echo "     Edit API keys: docker compose exec agent nano $$HERMES_HOME/.env"
+        exec sleep infinity
+    restart: unless-stopped
+
+  # ── Web UI ─────────────────────────────────────────────────────────────────
+  webui:
+    build:
+      context: ./hermes-webui-studio
+      dockerfile: Dockerfile
+    container_name: hermes-webui
+    depends_on:
+      - agent
+    ports:
+      # Bind to localhost only for security; remove "127.0.0.1:" to expose
+      # on all interfaces (use with a password or reverse proxy).
+      - "127.0.0.1:8790:8787"
+    volumes:
+      # Same hermes-home as the agent — shares config, sessions, .env, state
+      - hermes-home:/home/hermeswebui/.hermes
+      # Agent source mounted where docker_init.bash expects it.
+      # At startup the init script runs:
+      #   uv pip install /home/hermeswebui/.hermes/hermes-agent
+      # which installs the agent and all its Python dependencies.
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent
+      # Workspace directory — browse and edit files from the WebUI.
+      # Adapt the host path to your project directory.
+      - ${HERMES_WORKSPACE:-./workspace}:/workspace
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp
+      - HERMES_WEBUI_AGENT_DIR=/home/hermeswebui/.hermes/hermes-agent
+      - HERMES_WEBUI_DEFAULT_WORKSPACE=/workspace
+      # Path mapping: container_path:host_path pairs separated by commas.
+      # Used by "reveal in explorer" to show the host-machine path in Docker.
+      # If not set, bind mounts are auto-detected from /proc/1/mountinfo.
+      # - HERMES_WEBUI_PATH_MAP=/workspace:/home/user/myproject,/data:/mnt/data
+      # Match your host user's UID/GID for correct file permissions
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+      # Optional: set a password for remote access
+      # - HERMES_WEBUI_PASSWORD=your-secret-password
+    restart: unless-stopped
+
+volumes:
+  hermes-home:
+  hermes-agent-src:

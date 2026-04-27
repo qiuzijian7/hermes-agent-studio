@@ -6,6 +6,13 @@
 # Dependencies
 node_modules
 .venv
+venv
+__pycache__
+*.pyc
+*.pyo
+
+# Subprojects (webui has its own Dockerfile)
+hermes-webui-studio
 
 # CI/CD
 .github
@@ -13,4 +20,23 @@ node_modules
 # Environment files
 .env
 
+# IDE
+.vscode
+.idea
+.codebuddy
+
+# Build artifacts
+build/
+dist/
+*.egg-info
+
+# Docker volumes / data
+data/
+
+# Playwright
+.playwright
+
+# Misc
 *.md
+.cache
+.playwright-cli

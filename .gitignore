@@ -2,7 +2,10 @@
 /_pycache/
 *.pyc*
 __pycache__/
-.venv/
+.venv*/
+.venv-win/
+.playwright-cli/
+.codebuddy/
 .vscode/
 .env
 .env.local
@@ -62,3 +65,9 @@ mini-swe-agent/
 .direnv/
 result
 website/static/api/skills-index.json
+r(JSON.stringify({title
+setTimeout(r
+document.title)()
+$null
+{return
+{await
