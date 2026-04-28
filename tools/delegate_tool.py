@@ -832,12 +832,36 @@ def delegate_task(
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
 
+    # ★ 2026-04-27 Soft hook：通知 WebUI/观察者 child 已 spawned，并桥接 child 的
+    #   token / tool / reasoning 事件到父 session 观察者。这让 WebUI 能够在员工
+    #   聊天面板实时显示 child agent 的思考过程。
+    #   纯 optional：若主仓未安装 delegate_hooks（罕见），try/except 会跳过。
+    try:
+        from tools.delegate_hooks import (
+            notify_child_spawned as _hook_spawned,
+            build_child_event_bridge as _hook_bridge,
+        )
+        for (i, t, child) in children:
+            try:
+                _hook_spawned(parent_agent, child, t, i)
+                _hook_bridge(parent_agent, child, t, i)
+            except Exception as _he:
+                logger.debug("delegate_hooks spawn/bridge failed: %s", _he)
+    except ImportError:
+        pass
+
     if n_tasks == 1:
         # Single task -- run directly (no thread pool overhead)
         _i, _t, child = children[0]
         result = _run_single_child(0, _t["goal"], child, parent_agent,
                                    timeout_seconds=effective_timeout)
         results.append(result)
+        # ★ Soft hook: child 完成
+        try:
+            from tools.delegate_hooks import notify_child_completed as _hook_done
+            _hook_done(parent_agent, child, _t, 0, result)
+        except Exception:
+            pass
     else:
         # Batch -- run in parallel with per-task progress lines
         completed_count = 0
@@ -871,6 +895,16 @@ def delegate_task(
                     }
                 results.append(entry)
                 completed_count += 1
+
+                # ★ Soft hook: child 完成（batch 路径）
+                try:
+                    from tools.delegate_hooks import notify_child_completed as _hook_done
+                    idx_h = entry["task_index"]
+                    if 0 <= idx_h < len(children):
+                        _, _t_h, _child_h = children[idx_h]
+                        _hook_done(parent_agent, _child_h, _t_h, idx_h, entry)
+                except Exception:
+                    pass
 
                 # Print per-task completion line above the spinner
                 idx = entry["task_index"]

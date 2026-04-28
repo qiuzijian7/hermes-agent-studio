@@ -152,6 +152,7 @@ def _discover_tools():
         "tools.memory_tool",
         "tools.session_search_tool",
         "tools.clarify_tool",
+        "tools.user_continue_tool",  # WebUI 下："下一步"暂停机制（登录 / 验证码等人在回路场景）
         "tools.code_execution_tool",
         "tools.delegate_tool",
         "tools.agent_runner",  # OpenClaw-style async multi-agent: spawn_agent, steer_agent, list_agents
@@ -214,7 +215,8 @@ _LEGACY_TOOLSET_MAP = {
         "browser_navigate", "browser_snapshot", "browser_click",
         "browser_type", "browser_scroll", "browser_back",
         "browser_press", "browser_get_images",
-        "browser_vision", "browser_console"
+        "browser_vision", "browser_console",
+        "request_user_continue",  # P3: 登录 / 验证码等场景暂停 agent
     ],
     "cronjob_tools": ["cronjob"],
     "rl_tools": [

@@ -44,6 +44,7 @@ _HERMES_CORE_TOOLS = [
     "browser_type", "browser_scroll", "browser_back",
     "browser_press", "browser_get_images",
     "browser_vision", "browser_console",
+    "request_user_continue",  # P3: WebUI 下的"下一步"暂停机制
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
@@ -115,7 +116,8 @@ TOOLSETS = {
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
-            "browser_vision", "browser_console", "web_search"
+            "browser_vision", "browser_console", "web_search",
+            "request_user_continue",  # P3: WebUI 下的"下一步"暂停机制
         ],
         "includes": []
     },
