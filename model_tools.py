@@ -156,6 +156,7 @@ def _discover_tools():
         "tools.code_execution_tool",
         "tools.delegate_tool",
         "tools.agent_runner",  # OpenClaw-style async multi-agent: spawn_agent, steer_agent, list_agents
+        "tools.employee_script_tool",  # run_employee_script — execute scripts/ files (requires webui-studio)
         "tools.group_message_tool",  # Send messages to workspace group chat (总群)
         "tools.process_registry",
         "tools.send_message_tool",
