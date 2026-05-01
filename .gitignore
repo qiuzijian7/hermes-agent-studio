@@ -1,3 +1,5 @@
+.DS_Store
+
 /venv/
 /_pycache/
 *.pyc*
@@ -57,25 +59,24 @@ environments/benchmarks/evals/
 # Web UI build output
 hermes_cli/web_dist/
 
+# Web UI assets — synced from @nous-research/ui at build time via
+# `npm run sync-assets` (see web/package.json).
+web/public/fonts/
+web/public/ds-assets/
+
 # Release script temp files
 .release_notes.md
 mini-swe-agent/
 
 # Nix
 .direnv/
+.nix-stamps/
 result
 website/static/api/skills-index.json
-r(JSON.stringify({title
-setTimeout(r
-document.title)()
-$null
-{return
-{await
+models-dev-upstream/
+
+# Local studio files
 preset-check.yaml
 presets-loaded.yaml
 knot-models.yaml
 presets-employee.png
-snap2.yaml
-snap2.yaml
-.workbuddy/memory/2026-04-29.md
-.workbuddy/memory/2026-04-30.md
