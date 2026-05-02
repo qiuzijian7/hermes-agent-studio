@@ -1975,6 +1975,14 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """
 
     def _handler(args: dict, **kwargs) -> str:
+        # ── 注入 session_id：从 kwargs 取出，注入到工具参数中 ─────────
+        # 这样 MCP server 会把 session_id 带到任务数据里，
+        # gateway_client.py 就能根据 session_id 查找对应员工的 model。
+        _session_id = kwargs.get("session_id", "") or ""
+        if _session_id:
+            args = dict(args)  # 不修改原 dict
+            args["_hermes_session_id"] = _session_id
+
         # Circuit breaker: if this server has failed too many times
         # consecutively, short-circuit with a clear message so the model
         # stops retrying and uses alternative approaches (#10447).
